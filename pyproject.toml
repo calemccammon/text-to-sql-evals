@@ -1,0 +1,28 @@
+[project]
+name = "text-to-sql-evals"
+version = "0.1.0"
+description = "Execution-accuracy benchmark for text-to-SQL over a frozen DuckDB warehouse"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.5",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+# Only needed to run a live sweep. CI installs the base group and runs the stub
+# provider, so the test suite needs no model SDK and no credentials.
+live = [
+    "anthropic>=0.69",
+]
+
+[tool.uv]
+# Run via `python main.py`, not an installed entry point — so uv manages the
+# dependencies without trying to build this project as a package.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

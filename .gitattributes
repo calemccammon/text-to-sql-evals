@@ -1,0 +1,4 @@
+* text=auto
+
+# Committed fixture data — binary, and not the repo's source.
+fixture/*.parquet binary linguist-generated

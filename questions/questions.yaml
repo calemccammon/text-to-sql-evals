@@ -1,0 +1,288 @@
+# The benchmark. Each entry pairs a natural-language question with a reference
+# query; a candidate is correct when its result set matches the reference's under
+# the policy in evals/compare.py -- not when its SQL matches this text.
+#
+# Reference queries carry ORDER BY only when the question asks for an ordering.
+# That is load-bearing: the comparison treats row order as significant exactly
+# when the reference is ordered, so a gratuitous ORDER BY here would fail correct
+# candidates that returned the right rows in a different order.
+#
+# `features` tags what the question actually requires, so the report can say
+# which SQL constructs a model gets wrong rather than only how often.
+
+- id: q01
+  question: How many companies are in the portfolio?
+  difficulty: easy
+  features: [aggregate]
+  sql: |
+    SELECT COUNT(*) AS company_count FROM dim_company
+
+- id: q02
+  question: List the tickers of all companies in the Technology sector, alphabetically.
+  difficulty: easy
+  features: [filter, order]
+  sql: |
+    SELECT ticker FROM dim_company WHERE sector = 'Technology' ORDER BY ticker
+
+- id: q03
+  question: How many distinct trading days does the data cover?
+  difficulty: easy
+  features: [aggregate]
+  sql: |
+    SELECT COUNT(DISTINCT trading_date) AS trading_days FROM fct_daily_trading
+
+- id: q04
+  question: What was Apple's closing price on the most recent trading day?
+  difficulty: easy
+  features: [filter, subquery]
+  sql: |
+    SELECT close_price
+    FROM fct_daily_trading
+    WHERE ticker = 'AAPL'
+      AND trading_date = (SELECT MAX(trading_date) FROM fct_daily_trading)
+
+- id: q05
+  question: Which sector has the most companies? Return the sector and the count.
+  difficulty: easy
+  features: [aggregate, group, order, limit]
+  sql: |
+    SELECT sector, COUNT(*) AS company_count
+    FROM dim_company
+    GROUP BY sector
+    ORDER BY company_count DESC, sector
+    LIMIT 1
+
+- id: q06
+  question: What is the average closing price for each ticker? Order by ticker.
+  difficulty: easy
+  features: [aggregate, group, order]
+  sql: |
+    SELECT ticker, AVG(close_price) AS avg_close
+    FROM fct_daily_trading
+    GROUP BY ticker
+    ORDER BY ticker
+
+- id: q07
+  question: Which five stocks had the largest single-day gain? Return the ticker, the date, and the return percentage, best first.
+  difficulty: medium
+  features: [order, limit]
+  sql: |
+    SELECT ticker, trading_date, daily_return_pct
+    FROM fct_daily_trading
+    WHERE daily_return_pct IS NOT NULL
+    ORDER BY daily_return_pct DESC
+    LIMIT 5
+
+- id: q08
+  question: For each sector, what was the average 20-day annualized volatility on the most recent trading day? Order by sector.
+  difficulty: medium
+  features: [join, aggregate, group, order, subquery]
+  sql: |
+    SELECT c.sector, AVG(f.volatility_20d_annualized) AS avg_vol
+    FROM fct_daily_trading f
+    JOIN dim_company c ON f.ticker = c.ticker
+    WHERE f.trading_date = (SELECT MAX(trading_date) FROM fct_daily_trading)
+    GROUP BY c.sector
+    ORDER BY c.sector
+
+- id: q09
+  question: What is the highest closing price NVDA has reached, and on what date?
+  difficulty: medium
+  features: [filter, order, limit]
+  sql: |
+    SELECT trading_date, close_price
+    FROM fct_daily_trading
+    WHERE ticker = 'NVDA'
+    ORDER BY close_price DESC
+    LIMIT 1
+
+- id: q10
+  question: On how many trading days did AAPL close above its 200-day moving average?
+  difficulty: medium
+  features: [filter, aggregate]
+  sql: |
+    SELECT COUNT(*) AS days_above
+    FROM fct_daily_trading
+    WHERE ticker = 'AAPL'
+      AND sma_200d IS NOT NULL
+      AND close_price > sma_200d
+
+- id: q11
+  question: For each ticker, what is the difference between its highest and lowest closing price? Order by ticker.
+  difficulty: medium
+  features: [aggregate, group, arithmetic, order]
+  sql: |
+    SELECT ticker, MAX(close_price) - MIN(close_price) AS price_range
+    FROM fct_daily_trading
+    GROUP BY ticker
+    ORDER BY ticker
+
+- id: q12
+  question: On the most recent trading day, how many stocks closed higher than they opened?
+  difficulty: medium
+  features: [filter, aggregate, subquery]
+  sql: |
+    SELECT COUNT(*) AS up_days
+    FROM fct_daily_trading
+    WHERE trading_date = (SELECT MAX(trading_date) FROM fct_daily_trading)
+      AND close_price > open_price
+
+- id: q13
+  question: What is the average unemployment rate across all trading days?
+  difficulty: hard
+  features: [aggregate, grain]
+  # The macro columns are denormalized onto every ticker row, so averaging the
+  # column directly weights each day by the number of tickers. Correct answers
+  # collapse to one row per date first. This question exists to catch that.
+  sql: |
+    SELECT AVG(unemployment_rate) AS avg_unemployment
+    FROM (
+      SELECT DISTINCT trading_date, unemployment_rate
+      FROM fct_daily_trading
+    )
+
+- id: q14
+  question: Show the three most volatile stocks by 20-day annualized volatility on the most recent trading day, most volatile first. Return ticker and volatility.
+  difficulty: medium
+  features: [filter, order, limit, subquery]
+  sql: |
+    SELECT ticker, volatility_20d_annualized
+    FROM fct_daily_trading
+    WHERE trading_date = (SELECT MAX(trading_date) FROM fct_daily_trading)
+    ORDER BY volatility_20d_annualized DESC
+    LIMIT 3
+
+- id: q15
+  question: Which stocks closed within 5 percent of their 52-week high on the most recent trading day? Order by ticker.
+  difficulty: medium
+  features: [filter, arithmetic, order, subquery]
+  sql: |
+    SELECT ticker
+    FROM fct_daily_trading
+    WHERE trading_date = (SELECT MAX(trading_date) FROM fct_daily_trading)
+      AND close_price >= high_52w * 0.95
+    ORDER BY ticker
+
+- id: q16
+  question: What was the total trading volume for each calendar month of 2025? Return the month number and total volume, ordered by month.
+  difficulty: medium
+  features: [date, aggregate, group, order]
+  sql: |
+    SELECT MONTH(trading_date) AS month_num, SUM(volume) AS total_volume
+    FROM fct_daily_trading
+    WHERE YEAR(trading_date) = 2025
+    GROUP BY MONTH(trading_date)
+    ORDER BY month_num
+
+- id: q17
+  question: For each ticker, what percentage of trading days had a positive return? Order by ticker.
+  difficulty: hard
+  features: [aggregate, group, arithmetic, order]
+  sql: |
+    SELECT
+      ticker,
+      COUNT(*) FILTER (WHERE daily_return_pct > 0) * 100.0 / COUNT(*) AS pct_up_days
+    FROM fct_daily_trading
+    WHERE daily_return_pct IS NOT NULL
+    GROUP BY ticker
+    ORDER BY ticker
+
+- id: q18
+  question: Using the date dimension, which day of the week has the highest average daily return? Return the day name and the average.
+  difficulty: hard
+  features: [join, date, aggregate, group, order, limit]
+  sql: |
+    SELECT d.day_name, AVG(f.daily_return_pct) AS avg_return
+    FROM fct_daily_trading f
+    JOIN dim_date d ON f.trading_date = d.calendar_date
+    WHERE f.daily_return_pct IS NOT NULL
+    GROUP BY d.day_name
+    ORDER BY avg_return DESC
+    LIMIT 1
+
+- id: q19
+  question: For each quarter of 2025, what was the average fed funds rate? Return the quarter number and the average, ordered by quarter.
+  difficulty: hard
+  features: [date, aggregate, group, grain, order]
+  sql: |
+    SELECT QUARTER(trading_date) AS quarter_num, AVG(fed_funds_rate) AS avg_rate
+    FROM (
+      SELECT DISTINCT trading_date, fed_funds_rate
+      FROM fct_daily_trading
+      WHERE YEAR(trading_date) = 2025
+    )
+    GROUP BY QUARTER(trading_date)
+    ORDER BY quarter_num
+
+- id: q20
+  question: For NVDA, show the five most recent trading days with the close price and the previous day's close. Most recent first.
+  difficulty: hard
+  features: [window, order, limit]
+  sql: |
+    SELECT trading_date, close_price, prev_close_price
+    FROM fct_daily_trading
+    WHERE ticker = 'NVDA'
+    ORDER BY trading_date DESC
+    LIMIT 5
+
+- id: q21
+  question: On the most recent trading day, rank the stocks within each sector by closing price, highest first. Return sector, ticker, close price, and the rank.
+  difficulty: hard
+  features: [window, join, order, subquery]
+  sql: |
+    SELECT
+      c.sector,
+      f.ticker,
+      f.close_price,
+      RANK() OVER (PARTITION BY c.sector ORDER BY f.close_price DESC) AS price_rank
+    FROM fct_daily_trading f
+    JOIN dim_company c ON f.ticker = c.ticker
+    WHERE f.trading_date = (SELECT MAX(trading_date) FROM fct_daily_trading)
+    ORDER BY c.sector, price_rank
+
+- id: q22
+  question: Which ticker had the highest total trading volume overall, and what was it?
+  difficulty: medium
+  features: [aggregate, group, order, limit]
+  sql: |
+    SELECT ticker, SUM(volume) AS total_volume
+    FROM fct_daily_trading
+    GROUP BY ticker
+    ORDER BY total_volume DESC
+    LIMIT 1
+
+- id: q23
+  question: For each sector, how many companies are in it and what is their combined market cap? Order by sector.
+  difficulty: medium
+  features: [aggregate, group, order]
+  sql: |
+    SELECT sector, COUNT(*) AS company_count, SUM(market_cap) AS total_market_cap
+    FROM dim_company
+    GROUP BY sector
+    ORDER BY sector
+
+- id: q24
+  question: For each ticker, what was its first and last closing price in the data, and the percentage change between them? Order by ticker.
+  difficulty: hard
+  features: [window, cte, arithmetic, group, order]
+  sql: |
+    WITH bounds AS (
+      SELECT
+        ticker,
+        FIRST_VALUE(close_price) OVER (
+          PARTITION BY ticker ORDER BY trading_date
+          ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        ) AS first_close,
+        LAST_VALUE(close_price) OVER (
+          PARTITION BY ticker ORDER BY trading_date
+          ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        ) AS last_close
+      FROM fct_daily_trading
+    )
+    SELECT DISTINCT
+      ticker,
+      first_close,
+      last_close,
+      (last_close / first_close - 1) * 100 AS pct_change
+    FROM bounds
+    ORDER BY ticker
