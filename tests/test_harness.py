@@ -5,7 +5,14 @@ import json
 import pytest
 
 from evals.compare import Comparison
-from evals.providers import PRICING, StubProvider, Usage, build_provider, extract_sql
+from evals.providers import (
+    PRICING,
+    OllamaProvider,
+    StubProvider,
+    Usage,
+    build_provider,
+    extract_sql,
+)
 from evals.questions import Question, answer_key, load_questions, validate
 from evals.report import build_report
 from evals.runner import run_sweep
@@ -179,6 +186,96 @@ def test_build_provider_rejects_an_unknown_model():
 
 def test_build_provider_returns_the_stub_without_credentials():
     assert isinstance(build_provider("stub", {}), StubProvider)
+
+
+def test_build_provider_routes_the_ollama_prefix_locally():
+    provider = build_provider("ollama:llama3.1", {})
+    assert isinstance(provider, OllamaProvider)
+    assert provider.model == "llama3.1"
+
+
+def test_build_provider_rejects_a_bare_ollama_prefix():
+    with pytest.raises(ValueError, match="expected a model after"):
+        build_provider("ollama:", {})
+
+
+# ── Ollama provider (no daemon required) ──────────────────────────────────────
+
+def _fake_ollama(response: dict):
+    """A stand-in transport that records the payload it was handed."""
+    sent: dict = {}
+
+    def post(url, payload, timeout):
+        sent["url"] = url
+        sent["payload"] = payload
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    return post, sent
+
+
+def test_ollama_parses_content_and_token_counts():
+    post, _ = _fake_ollama({
+        "message": {"content": "SELECT 1"},
+        "prompt_eval_count": 120,
+        "eval_count": 8,
+    })
+    completion = OllamaProvider("llama3.1", post=post).complete("sys", "prompt")
+    assert completion.text == "SELECT 1"
+    assert completion.usage.input_tokens == 120
+    assert completion.usage.output_tokens == 8
+    assert completion.error is None
+
+
+def test_ollama_costs_nothing():
+    post, _ = _fake_ollama({
+        "message": {"content": "SELECT 1"},
+        "prompt_eval_count": 1_000_000,
+        "eval_count": 1_000_000,
+    })
+    completion = OllamaProvider("llama3.1", post=post).complete("sys", "prompt")
+    assert completion.usage.cost_usd(completion.model) == 0.0
+
+
+def test_ollama_pins_sampling_for_reproducibility():
+    """Ollama still accepts sampling parameters, so the local path can be
+    deterministic in a way the Claude path cannot."""
+    post, sent = _fake_ollama({"message": {"content": "SELECT 1"}})
+    OllamaProvider("llama3.1", post=post).complete("sys", "prompt")
+    assert sent["payload"]["options"] == {"temperature": 0, "seed": 0}
+    assert sent["payload"]["stream"] is False
+
+
+def test_ollama_sends_the_system_prompt_as_its_own_message():
+    post, sent = _fake_ollama({"message": {"content": "SELECT 1"}})
+    OllamaProvider("llama3.1", post=post).complete("SYSTEM", "PROMPT")
+    roles = [m["role"] for m in sent["payload"]["messages"]]
+    assert roles == ["system", "user"]
+    assert sent["payload"]["messages"][0]["content"] == "SYSTEM"
+
+
+def test_ollama_reports_a_missing_daemon_as_an_actionable_error():
+    post, _ = _fake_ollama(ConnectionRefusedError("connection refused"))
+    completion = OllamaProvider("llama3.1", post=post).complete("sys", "prompt")
+    assert completion.text == ""
+    assert "ollama serve" in completion.error
+
+
+def test_ollama_surfaces_a_model_not_pulled_error():
+    post, _ = _fake_ollama({"error": 'model "nope" not found, try pulling it first'})
+    completion = OllamaProvider("nope", post=post).complete("sys", "prompt")
+    assert completion.error and "not found" in completion.error
+
+
+def test_an_ollama_failure_is_scored_not_raised(con, questions):
+    """A dead daemon must fail the sweep's questions, not crash the sweep."""
+    post, _ = _fake_ollama(ConnectionRefusedError("refused"))
+    provider = OllamaProvider("llama3.1", post=post)
+    result = run_sweep(con, questions[:3], provider, [PromptVariant.FULL], progress=False)
+    assert len(result.attempts) == 3
+    assert result.accuracy == 0.0
+    assert all(a.failure == "no_sql" for a in result.attempts)
 
 
 def test_every_priced_model_is_a_claude_id():

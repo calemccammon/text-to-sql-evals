@@ -247,17 +247,135 @@ class AnthropicProvider:
         )
 
 
+# ── Ollama (local) ────────────────────────────────────────────────────────────
+
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+
+# Local generation is slow compared with a hosted API, and a hard question can
+# take minutes on consumer hardware. This bounds a hung request, not a slow one.
+OLLAMA_TIMEOUT_SECONDS = 300.0
+
+
+def _post_json(url: str, payload: dict, timeout: float) -> dict:
+    """Minimal JSON POST over the standard library.
+
+    Deliberately not `requests`: the base install is duckdb and pyyaml, and a
+    local provider is not worth a third runtime dependency.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+class OllamaProvider:
+    """A model served locally by Ollama.
+
+    Included because it costs nothing to run, which makes a real sweep possible
+    without API billing -- and because the frontier-versus-local gap is a more
+    informative result than any single model's score. A small local model fails
+    text-to-SQL in ways the taxonomy can name, which is exactly what the
+    taxonomy is for.
+
+    Unlike the Claude path, this one *can* be made deterministic: Ollama still
+    accepts sampling parameters, so temperature is pinned to 0 and a seed is
+    fixed. Two runs of the same local configuration produce the same answers,
+    which the hosted path cannot promise.
+    """
+
+    name = "ollama"
+
+    def __init__(
+        self,
+        model: str,
+        host: str = OLLAMA_HOST,
+        timeout: float = OLLAMA_TIMEOUT_SECONDS,
+        post=_post_json,
+        seed: int = 0,
+    ) -> None:
+        self.model = model
+        self._url = f"{host.rstrip('/')}/api/chat"
+        self._timeout = timeout
+        self._post = post
+        self._seed = seed
+
+    def complete(self, system: str, prompt: str) -> Completion:
+        payload = {
+            "model": self.model,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            "options": {"temperature": 0, "seed": self._seed},
+        }
+
+        started = time.perf_counter()
+        try:
+            body = self._post(self._url, payload, self._timeout)
+        except OSError as exc:
+            # Connection refused is the overwhelmingly common case: the daemon
+            # is not running. Say so rather than surfacing a bare errno.
+            return Completion(
+                text="", model=self.model,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error=f"could not reach Ollama at {self._url} ({exc}); is `ollama serve` running?",
+            )
+        except Exception as exc:  # noqa: BLE001 -- scored as a failure, not a crash
+            return Completion(
+                text="", model=self.model,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error=f"ollama error: {exc}",
+            )
+
+        latency_ms = (time.perf_counter() - started) * 1000
+        if "error" in body:
+            return Completion(
+                text="", model=self.model, latency_ms=latency_ms,
+                error=f"ollama error: {body['error']}",
+            )
+
+        return Completion(
+            text=(body.get("message") or {}).get("content", ""),
+            model=self.model,
+            # Ollama reports prompt/completion counts under its own names. There
+            # is no cache, so those fields stay zero, and cost stays zero because
+            # a local model has no per-token price.
+            usage=Usage(
+                input_tokens=body.get("prompt_eval_count", 0) or 0,
+                output_tokens=body.get("eval_count", 0) or 0,
+            ),
+            latency_ms=latency_ms,
+        )
+
+
 def build_provider(spec: str, answers: dict[str, str], effort: str = "high") -> Provider:
     """Resolve a `--model` argument to a provider.
 
-    `stub` needs no credentials and is what CI runs; anything else is treated as
-    a Claude model id.
+    Three routes, kept unambiguous by an explicit prefix on the local one:
+    `stub` (offline, what CI runs), `ollama:<model>` (local, free), and any
+    Claude model id (hosted, billed).
     """
     if spec == "stub":
         return StubProvider(answers)
+    if spec.startswith("ollama:"):
+        local_model = spec.split(":", 1)[1]
+        if not local_model:
+            raise ValueError("expected a model after 'ollama:', e.g. ollama:llama3.1")
+        return OllamaProvider(local_model)
     if spec not in PRICING:
         known = ", ".join(sorted(PRICING))
-        raise ValueError(f"unknown model {spec!r}; expected 'stub' or one of: {known}")
+        raise ValueError(
+            f"unknown model {spec!r}; expected 'stub', 'ollama:<model>', or one of: {known}"
+        )
     if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
         # Not fatal -- an `ant auth login` profile also works -- but the most
         # common cause of a failed sweep is no credential at all.

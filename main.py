@@ -93,7 +93,8 @@ def main() -> int:
 
     run = sub.add_parser("run", help="run a sweep")
     run.add_argument("--model", default="stub",
-                     help=f"'stub' (default, offline) or one of: {', '.join(sorted(PRICING))}")
+                     help="'stub' (default, offline), 'ollama:<model>' (local, free), "
+                          f"or one of: {', '.join(sorted(PRICING))}")
     run.add_argument("--variant", action="append", choices=[v.value for v in PromptVariant],
                      help="prompt variant; repeatable, defaults to all")
     run.add_argument("--effort", default="high",

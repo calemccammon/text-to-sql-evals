@@ -36,12 +36,19 @@ behavior pass.
   response text — hence the generous default in `providers.py`.
 - Always check `stop_reason` before reading `response.content`; a declined
   request returns HTTP 200 with empty content.
+- Ollama is the exception to the sampling rule: it still accepts `temperature`
+  and `seed`, both pinned in `OllamaProvider` so local runs are reproducible.
+  That asymmetry is deliberate — do not "harmonize" the two providers.
 
 ## Running things
 
 - `python main.py run` — offline stub sweep, no key, no cost. This is what CI runs.
-- `python main.py run --model claude-opus-5` — a real sweep; needs the `live`
-  dependency group and a credential.
+- `python main.py run --model ollama:llama3.2` — a real sweep against a local
+  model. No key, no billing; needs `ollama serve` running. This produced the
+  committed report.
+- `python main.py run --model claude-opus-5` — a hosted sweep; needs the `live`
+  dependency group and a credential, and bills against API credits (a Claude
+  subscription does not cover it).
 - `python main.py report` — rebuild `REPORT.md` from the committed run.
 - Never commit a `REPORT.md` that disagrees with `results/latest-run.json`; CI
   regenerates and diffs it.
