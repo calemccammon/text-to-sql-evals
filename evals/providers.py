@@ -37,6 +37,10 @@ PRICING: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.00, 5.00),
 }
 
+# Models that have no `effort` parameter. Sending `output_config.effort` to one
+# of these is rejected, so the provider leaves it out.
+NO_EFFORT_MODELS = frozenset({"claude-haiku-4-5"})
+
 
 @dataclass(frozen=True)
 class Usage:
@@ -165,10 +169,10 @@ class StubProvider:
 class AnthropicProvider:
     """Claude via the Anthropic SDK.
 
-    The schema is identical across every question in a sweep, so it is sent as a
-    cached system prefix: the first call pays to write it and the rest read it at
-    roughly a tenth of the input rate. That is the single largest cost lever here
-    -- the schema dwarfs the question in every prompt.
+    The runner puts the schema in the system prompt, and it is identical for
+    every question in a prompt variant, so the system block is marked as a
+    cached prefix: the first call of a variant pays to write it and the rest
+    read it at roughly a tenth of the input rate.
     """
 
     name = "anthropic"
@@ -192,7 +196,9 @@ class AnthropicProvider:
         # `ant auth login` profile -- an unset env var does not mean no credential.
         self._client = anthropic.Anthropic()
         self.model = model
-        self._effort = effort
+        # None when the model does not take the parameter; main.py records this
+        # value in the run, so it reflects what was actually sent.
+        self.effort = None if model in NO_EFFORT_MODELS else effort
         self._max_tokens = max_tokens
         self._cache = cache_system_prompt
 
@@ -202,18 +208,21 @@ class AnthropicProvider:
             # The minimum cacheable prefix is model-dependent (512 tokens on
             # Opus 5, 1024 on Sonnet 5, 4096 on Haiku 4.5). Below it the marker
             # is ignored silently -- no error, just no cache hit -- so check
-            # cache_read_tokens in the report rather than assuming it worked.
+            # cache_read_tokens in the run JSON rather than assuming it worked.
             system_blocks[-1]["cache_control"] = {"type": "ephemeral"}
+
+        request: dict = {
+            "model": self.model,
+            "max_tokens": self._max_tokens,
+            "system": system_blocks,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if self.effort is not None:
+            request["output_config"] = {"effort": self.effort}
 
         started = time.perf_counter()
         try:
-            response = self._client.messages.create(
-                model=self.model,
-                max_tokens=self._max_tokens,
-                system=system_blocks,
-                output_config={"effort": self._effort},
-                messages=[{"role": "user", "content": prompt}],
-            )
+            response = self._client.messages.create(**request)
         except self._anthropic.APIStatusError as exc:
             return self._failure(f"API error {exc.status_code}: {exc.message}", started)
         except self._anthropic.APIConnectionError as exc:

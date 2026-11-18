@@ -63,11 +63,12 @@ def classify_mismatch(comparison: Comparison) -> Failure:
     return Failure.WRONG_VALUES
 
 
-#  Grouped for reporting: the first group is fixable by retrying with the error
-#  text, the second is not.
+#  The failures that come with a database error message, which is what the
+#  runner feeds back on a retry. NO_SQL is not here: there was no query to run,
+#  so there is no error text, and the runner stops without retrying.
 RETRYABLE = frozenset({
     Failure.SYNTAX_ERROR, Failure.UNKNOWN_TABLE, Failure.UNKNOWN_COLUMN,
-    Failure.TYPE_ERROR, Failure.EXECUTION_ERROR, Failure.NO_SQL,
+    Failure.TYPE_ERROR, Failure.EXECUTION_ERROR,
 })
 
 
