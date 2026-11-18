@@ -7,6 +7,7 @@ import pytest
 from evals.compare import Comparison
 from evals.providers import (
     PRICING,
+    Completion,
     OllamaProvider,
     StubProvider,
     Usage,
@@ -16,7 +17,7 @@ from evals.providers import (
 from evals.questions import Question, answer_key, load_questions, validate
 from evals.report import build_report
 from evals.runner import run_sweep
-from evals.schema import PromptVariant, build_prompt, introspect, render_schema
+from evals.schema import PromptVariant, build_prompt, build_system, introspect, render_schema
 from evals.taxonomy import Failure, classify_error, classify_mismatch, is_retryable
 from evals.warehouse import connect, run_query
 
@@ -110,6 +111,13 @@ def test_only_failures_the_database_explained_are_retryable():
     assert not is_retryable(Failure.TIMEOUT)
 
 
+def test_the_retryable_set_matches_what_the_runner_retries():
+    """Any other database error is fed back too. A response with no SQL has no
+    error text to feed back, and the runner stops on it without retrying."""
+    assert is_retryable(Failure.EXECUTION_ERROR)
+    assert not is_retryable(Failure.NO_SQL)
+
+
 # ── SQL extraction ────────────────────────────────────────────────────────────
 
 def test_extracts_bare_sql_unchanged():
@@ -163,7 +171,7 @@ def test_an_unknown_model_reports_zero_rather_than_guessing():
 
 def test_the_stub_is_deterministic(questions):
     stub = StubProvider(answer_key(questions))
-    prompt = build_prompt(questions[0].question, "schema")
+    prompt = build_prompt(questions[0].question)
     first = stub.complete("sys", prompt)
     second = stub.complete("sys", prompt)
     assert first.text == second.text
@@ -172,7 +180,7 @@ def test_the_stub_is_deterministic(questions):
 def test_the_stub_produces_correct_wrong_and_broken_answers(questions):
     stub = StubProvider(answer_key(questions))
     answers = {
-        q.id: stub.complete("sys", build_prompt(q.question, "schema")).text
+        q.id: stub.complete("sys", build_prompt(q.question)).text
         for q in questions
     }
     exact = sum(answers[q.id] == q.sql for q in questions)
@@ -300,6 +308,54 @@ def test_sample_rows_are_deterministic(con):
     first = render_schema(tables, PromptVariant.FULL_WITH_SAMPLES, con)
     second = render_schema(tables, PromptVariant.FULL_WITH_SAMPLES, con)
     assert first == second
+
+
+def test_the_schema_is_part_of_the_system_prompt_not_the_question():
+    """The system prompt is the prefix a provider can cache, so the schema has
+    to be in it for caching to cover anything worth caching."""
+    assert "TABLE dim_company" in build_system("TABLE dim_company")
+    assert build_prompt("How many tickers?") == "Question: How many tickers?\n\nSQL:"
+
+
+# ── Retry ─────────────────────────────────────────────────────────────────────
+
+class _ScriptedProvider:
+    """Returns canned responses in order and records what it was sent."""
+
+    name = "scripted"
+    model = "scripted-v1"
+
+    def __init__(self, replies: list[str]) -> None:
+        self._replies = list(replies)
+        self.systems: list[str] = []
+        self.prompts: list[str] = []
+
+    def complete(self, system: str, prompt: str) -> Completion:
+        self.systems.append(system)
+        self.prompts.append(prompt)
+        return Completion(text=self._replies.pop(0), model=self.model)
+
+
+def test_a_database_error_is_fed_back_and_the_retry_can_recover(con, questions):
+    question = questions[0]
+    provider = _ScriptedProvider(["SELECT no_such_column FROM dim_company", question.sql])
+    result = run_sweep(con, [question], provider, [PromptVariant.FULL], progress=False)
+    attempt = result.attempts[0]
+    assert attempt.attempts == 2
+    assert attempt.correct
+    assert "no_such_column" in provider.prompts[1], "the error text must be fed back"
+    assert "TABLE fct_daily_trading" in provider.systems[0]
+    assert "TABLE fct_daily_trading" not in provider.prompts[0]
+
+
+def test_a_wrong_but_valid_answer_is_not_retried(con, questions):
+    question = questions[0]
+    provider = _ScriptedProvider(["SELECT 'not the answer' AS a, 'at all' AS b, 1 AS c, 2 AS d"])
+    result = run_sweep(con, [question], provider, [PromptVariant.FULL], progress=False)
+    attempt = result.attempts[0]
+    assert attempt.attempts == 1
+    assert not attempt.correct
+    assert len(provider.prompts) == 1
 
 
 # ── End to end ────────────────────────────────────────────────────────────────

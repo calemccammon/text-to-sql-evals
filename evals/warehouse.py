@@ -27,8 +27,10 @@ DEFAULT_TIMEOUT_SECONDS = 15.0
 
 # A generated statement must be exactly one read. Anything that writes, changes
 # schema, attaches a file, or reaches the filesystem is refused before it runs.
+# REPLACE is refused as a keyword (INSERT OR REPLACE, CREATE OR REPLACE) but not
+# when a bracket follows it, which is the string function or SELECT * REPLACE (...).
 _FORBIDDEN = re.compile(
-    r"\b(insert|update|delete|drop|create|alter|truncate|replace|attach|detach|"
+    r"\b(insert|update|delete|drop|create|alter|truncate|replace(?!\s*\()|attach|detach|"
     r"copy|export|import|install|load|pragma|set|call|grant|revoke|vacuum|"
     r"checkpoint|read_csv|read_parquet|read_json)\b",
     re.IGNORECASE,
@@ -54,9 +56,42 @@ class QueryResult:
 
 
 def strip_sql_comments(sql: str) -> str:
-    """Remove comments so they cannot hide a forbidden keyword from the guard."""
-    without_block = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
-    return re.sub(r"--[^\n]*", " ", without_block)
+    """Remove comments so they cannot hide a forbidden keyword from the guard.
+
+    A comment marker inside a quoted string or identifier is text, not a
+    comment, so quotes are tracked while scanning. Treating the `--` in
+    `SELECT '--'; DROP TABLE t` as a comment would hide the second statement.
+    """
+    out: list[str] = []
+    quote = None
+    i, n = 0, len(sql)
+    while i < n:
+        char = sql[i]
+        if quote:
+            out.append(char)
+            if char == quote:
+                quote = None
+            i += 1
+        elif char in ("'", '"'):
+            quote = char
+            out.append(char)
+            i += 1
+        elif sql.startswith("--", i):
+            end = sql.find("\n", i)
+            out.append(" ")
+            i = n if end == -1 else end
+        elif sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            if end == -1:
+                # Unterminated: keep the text so the guard still inspects it.
+                out.append(sql[i:])
+                break
+            out.append(" ")
+            i = end + 2
+        else:
+            out.append(char)
+            i += 1
+    return "".join(out)
 
 
 def _split_statements(sql: str) -> list[str]:
@@ -137,12 +172,15 @@ def run_query(
     and is interrupted if it overruns.
     """
     assert_read_only(sql)
+    # Execute the comment-stripped text the guard inspected rather than the
+    # original, so nothing the stripper removed can reach the database.
+    statement = strip_sql_comments(sql)
 
     outcome: dict = {}
 
     def execute() -> None:
         try:
-            cursor = con.execute(sql)
+            cursor = con.execute(statement)
             columns = [d[0] for d in cursor.description] if cursor.description else []
             outcome["result"] = QueryResult(columns=columns, rows=cursor.fetchall())
         except BaseException as exc:  # noqa: BLE001 -- re-raised on the caller's thread

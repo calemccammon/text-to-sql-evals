@@ -49,7 +49,7 @@ The accepted hosted model IDs are the keys of `PRICING` in `evals/providers.py`:
 | `--limit N` | Only the first N questions |
 | `--retries N` | Retries after a retryable database error (default 1) |
 | `--timeout S` | Per-query time budget in seconds (default 15) |
-| `--effort` | `output_config.effort` for the hosted provider (default `high`) |
+| `--effort` | `output_config.effort` for the hosted provider (default `high`). Not sent to `claude-haiku-4-5`, which has no effort parameter |
 | `--dry-run` | Run the sweep and write nothing |
 
 ## How it works
@@ -114,7 +114,7 @@ How much schema to send is treated as a measured axis. Each question is asked on
 | `full` | Every column with its type |
 | `full_with_samples` | `full`, plus three sample rows per table showing the first six columns |
 
-The schema is read from the live connection through `information_schema`, and sample rows are selected with a fixed `ORDER BY` so the prompt is identical on every run.
+The schema is read from the live connection through `information_schema`, and sample rows are selected with a fixed `ORDER BY` so the prompt is identical on every run. The schema text is appended to the system prompt, and the user message holds only the question.
 
 ### Comparison policy
 
@@ -151,11 +151,11 @@ When a query fails with a database error, the model is prompted again with the e
 
 Generated SQL is treated as untrusted input. Three measures apply, in `evals/warehouse.py`:
 
-- **Guard.** After comments are stripped, the text must be a single statement that begins with `SELECT` or `WITH` and contains none of a list of keywords covering writes, schema changes, `ATTACH`, `COPY`, `PRAGMA`, `SET` and the `read_csv`, `read_parquet` and `read_json` functions. Semicolons inside string literals are not treated as separators.
+- **Guard.** After comments are stripped, the text must be a single statement that begins with `SELECT` or `WITH` and contains none of a list of keywords covering writes, schema changes, `ATTACH`, `COPY`, `PRAGMA`, `SET` and the `read_csv`, `read_parquet` and `read_json` functions. Comment markers and semicolons inside quoted strings are treated as text, so `SELECT '--'; DROP TABLE dim_company` is refused as two statements. `REPLACE` is refused as a keyword and allowed when a bracket follows it, as in the `REPLACE()` string function. The query that runs is the comment-stripped text the guard inspected.
 - **Isolation.** The Parquet files are copied into in-memory tables and `enable_external_access` is then set to false. There is no database file, and the connection cannot read the filesystem.
 - **Timeout.** Each query runs on a worker thread with a 15-second budget and is interrupted if it overruns, so a runaway cross join is scored as `timeout`.
 
-The guard has known gaps, listed under Limitations.
+The guard's false positives are listed under Limitations.
 
 ### Providers and cost
 
@@ -163,7 +163,7 @@ All providers return the same `Completion` record, and the runner does not branc
 
 - **Stub** answers from the reference SQL. Keyed on the question text, it returns the reference unchanged, a wrong-but-valid variant, or a query against a table that does not exist. CI uses it to run the scoring path end to end.
 - **Ollama** posts to `/api/chat` with the standard library. Temperature is set to 0 and the seed is fixed. `OLLAMA_HOST` overrides the default `http://localhost:11434`.
-- **Anthropic** calls `messages.create` with `output_config.effort` and no sampling parameters. The code comments give the reason: `temperature`, `top_p` and `top_k` are rejected with a 400 on Claude Opus 5, Sonnet 5 and Opus 4.8/4.7. API errors and refusals are recorded as `no_sql` failures and do not stop the sweep.
+- **Anthropic** calls `messages.create` with `output_config.effort` and no sampling parameters, and marks the system block, which holds the instructions and the schema, with `cache_control`. The code comments give the reason for omitting sampling parameters: `temperature`, `top_p` and `top_k` are rejected with a 400 on Claude Opus 5, Sonnet 5 and Opus 4.8/4.7. API errors and refusals are recorded as `no_sql` failures and do not stop the sweep.
 
 Each attempt records input, output, cache-read and cache-write tokens, latency and cost. Cost is computed from the per-model list prices in `PRICING`, with cache reads at 0.1x and cache writes at 1.25x the input rate. Models without a price entry, including every Ollama model, cost 0. The report shows total and per-variant cost and p50 and p95 latency.
 
@@ -185,28 +185,26 @@ The committed [`REPORT.md`](REPORT.md) is a sweep of `llama3.2` through Ollama: 
 - **Feeding the error back rarely helped.** 42 attempts hit a retryable error and were re-prompted, and 2 then succeeded.
 - **Accuracy falls with the difficulty label**: 9/18 easy, 9/33 medium, 4/21 hard.
 
-These figures describe one small local model on 24 questions over one schema.
+These figures describe one small local model on 24 questions over one schema. The run was made with the schema in the user message. It is now sent in the system prompt, so a new run of the same command may not reproduce these numbers exactly.
 
 ## Testing
 
-The suite has 97 test cases and needs no network, credential or database file. 28 of them cover `compare.py`, one or more per rule in the comparison policy. The rest cover the read-only guard and timeout, the fixture's row count and date span, error classification, SQL extraction, cost arithmetic, question validation, the Ollama provider through an injected transport, and stub sweeps through the runner and report.
+The suite has 107 test cases and needs no network, credential or database file. 28 of them cover `compare.py`, one or more per rule in the comparison policy. The rest cover the read-only guard and timeout, the fixture's row count and date span, error classification, SQL extraction, cost arithmetic, question validation, the Ollama provider through an injected transport, the retry path through a scripted provider, and stub sweeps through the runner and report.
 
 CI (`.github/workflows/ci.yml`) runs the tests, checks that `REPORT.md` matches the committed run, and runs a stub sweep with `--dry-run`.
 
-The Anthropic provider has no tests, and the retry path is only exercised with the stub, whose broken answers do not change on retry.
+The Anthropic provider has no tests.
 
 ## Limitations
 
-- **Prompt caching does not take effect.** The Anthropic provider sets `cache_control` on the system block, but the system block holds only the four-line instruction. The schema is sent in the user message. The marked prefix is too short to be cached, and the report does not show cache token counts, which are only in the run JSON.
+- **Prompt caching is unmeasured.** The API ignores a cache marker on a prefix shorter than a model-dependent minimum, without an error. Whether the system prompt and schema reach that minimum for a given model and variant has not been measured. The report does not show cache token counts, which are only in the run JSON.
 - **No hosted run has been committed.** The Anthropic provider and the cost figures have not been exercised in the committed results.
 - **Hosted runs are not reproducible.** No temperature or seed is sent on the hosted path, so two runs of the same configuration can differ and a small accuracy gap between models may be noise. Ollama runs pin both.
-- **The guard is a keyword filter over text.** It rejects valid reads that use a listed word, such as the `REPLACE()` string function or a string literal containing `call`, and scores them as `refused_unsafe`. Comment stripping ignores string literals, so `SELECT '--'; DROP TABLE dim_company` passes the guard. In that case the in-memory database with external access disabled is the only containment.
+- **The guard is a keyword filter over text.** It rejects valid reads that contain a listed word anywhere, including inside a string literal such as `'call'`, and scores them as `refused_unsafe`.
 - **Schema retrieval is not measured.** Three tables fit in a prompt, so the variants measure how much column detail a model needs, not table selection.
 - **Query quality is not measured.** A correct result from a full scan scores the same as any other correct result.
 - **The question set is small.** 24 questions over one schema can compare configurations with each other. They do not predict accuracy on other data.
 
-## Licence and data
-
-MIT.
+## Data
 
 The fixture data originates from Yahoo Finance (via `yfinance`) and FRED, by way of the `data-engineer-finance-analytics` warehouse. It is a small historical slice included as a test fixture.

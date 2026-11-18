@@ -110,9 +110,15 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_prompt(question: str, schema_text: str) -> str:
-    return (
-        f"Schema:\n\n{schema_text}\n\n"
-        f"Question: {question}\n\n"
-        "SQL:"
-    )
+def build_system(schema_text: str) -> str:
+    """The instructions followed by the schema.
+
+    The schema goes here rather than in the user message because it is the
+    same for every question in a variant: a provider that caches the system
+    prompt then caches the schema with it.
+    """
+    return f"{SYSTEM_PROMPT}\n\nSchema:\n\n{schema_text}"
+
+
+def build_prompt(question: str) -> str:
+    return f"Question: {question}\n\nSQL:"

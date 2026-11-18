@@ -51,6 +51,8 @@ def test_the_connection_cannot_reach_the_filesystem(con):
     "select ticker from dim_company",
     "WITH x AS (SELECT 1 AS n) SELECT n FROM x",
     "  \n SELECT 1 ",
+    "SELECT REPLACE(ticker, 'A', 'B') FROM dim_company",
+    "SELECT '--' AS dashes, '/* not a comment */' AS text",
 ])
 def test_accepts_a_single_read(sql):
     assert_read_only(sql) is None
@@ -83,6 +85,20 @@ def test_refuses_a_forbidden_keyword_hidden_in_a_comment():
         assert_read_only("SELECT 1 /* harmless */ ; DROP TABLE dim_company")
 
 
+def test_refuses_a_second_statement_after_a_comment_marker_in_a_string():
+    """'--' inside a literal is text. Stripping it as a comment would hide the
+    rest of the line, and the DROP with it, from the guard."""
+    with pytest.raises(UnsafeSQLError, match="single statement"):
+        assert_read_only("SELECT '--'; DROP TABLE dim_company")
+    with pytest.raises(UnsafeSQLError, match="single statement"):
+        assert_read_only("SELECT '/*'; DROP TABLE dim_company; SELECT '*/'")
+
+
+def test_refuses_replace_as_a_keyword():
+    with pytest.raises(UnsafeSQLError, match="REPLACE"):
+        assert_read_only("WITH x AS (SELECT 1) REPLACE INTO dim_company SELECT * FROM x")
+
+
 def test_refuses_reading_a_file_from_inside_a_select():
     with pytest.raises(UnsafeSQLError, match="READ_PARQUET|READ_CSV"):
         assert_read_only("SELECT * FROM read_parquet('/etc/shadow')")
@@ -103,12 +119,22 @@ def test_strip_sql_comments_removes_both_forms():
     assert "SELECT 1" in cleaned and "FROM t" in cleaned
 
 
+def test_strip_sql_comments_leaves_markers_inside_quotes_alone():
+    sql = "SELECT '--' AS a, '/* x */' AS b, \"c--d\" FROM t"
+    assert strip_sql_comments(sql) == sql
+
+
 # ── Execution ─────────────────────────────────────────────────────────────────
 
 def test_run_query_returns_columns_and_rows(con):
     result = run_query(con, "SELECT ticker, sector FROM dim_company ORDER BY ticker LIMIT 2")
     assert result.columns == ["ticker", "sector"]
     assert len(result) == 2
+
+
+def test_run_query_keeps_a_comment_marker_inside_a_string(con):
+    result = run_query(con, "SELECT '--' AS dashes -- a real comment")
+    assert result.rows == [("--",)]
 
 
 def test_run_query_enforces_the_guard(con):

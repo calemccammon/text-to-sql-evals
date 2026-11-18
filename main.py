@@ -22,7 +22,7 @@ from evals.questions import answer_key, load_questions
 from evals.report import build_report
 from evals.runner import run_sweep
 from evals.schema import PromptVariant
-from evals.warehouse import FIXTURE_DIR, connect
+from evals.warehouse import DEFAULT_TIMEOUT_SECONDS, FIXTURE_DIR, connect
 
 ROOT = Path(__file__).resolve().parent
 RESULTS_DIR = ROOT / "results"
@@ -31,7 +31,8 @@ REPORT_PATH = ROOT / "REPORT.md"
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    questions = load_questions()
+    all_questions = load_questions()
+    questions = all_questions
     if args.difficulty:
         questions = [q for q in questions if q.difficulty == args.difficulty]
     if args.limit:
@@ -41,7 +42,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     variants = [PromptVariant(v) for v in (args.variant or [v.value for v in PromptVariant])]
-    provider = build_provider(args.model, answer_key(load_questions()), effort=args.effort)
+    provider = build_provider(args.model, answer_key(all_questions), effort=args.effort)
 
     print(
         f"Running {len(questions)} question(s) x {len(variants)} variant(s) "
@@ -62,7 +63,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         "question_count": len(questions),
         "models": sorted({a.model for a in result.attempts}),
         "variants": [v.value for v in variants],
-        "effort": args.effort,
+        # Only the hosted provider has an effort setting; null for the others.
+        "effort": getattr(provider, "effort", None),
         "attempts": [asdict(a) for a in result.attempts],
     }
 
@@ -98,12 +100,13 @@ def main() -> int:
     run.add_argument("--variant", action="append", choices=[v.value for v in PromptVariant],
                      help="prompt variant; repeatable, defaults to all")
     run.add_argument("--effort", default="high",
-                     choices=["low", "medium", "high", "xhigh", "max"])
+                     choices=["low", "medium", "high", "xhigh", "max"],
+                     help="hosted models only; not sent to models without the parameter")
     run.add_argument("--difficulty", choices=["easy", "medium", "hard"])
     run.add_argument("--limit", type=int, help="only the first N questions")
     run.add_argument("--retries", type=int, default=1,
                      help="retries after a retryable database error (default 1)")
-    run.add_argument("--timeout", type=float, default=15.0)
+    run.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     run.add_argument("--dry-run", action="store_true",
                      help="run the sweep but write nothing — used by CI to smoke-test "
                           "the pipeline without overwriting the committed results")

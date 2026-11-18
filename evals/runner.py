@@ -16,9 +16,15 @@ import duckdb
 from .compare import Comparison, compare_results, has_top_level_order_by
 from .providers import Completion, Provider, Usage, extract_sql
 from .questions import Question
-from .schema import PromptVariant, SYSTEM_PROMPT, build_prompt, introspect, render_schema
+from .schema import PromptVariant, build_prompt, build_system, introspect, render_schema
 from .taxonomy import Failure, classify_error, classify_mismatch, is_retryable
-from .warehouse import QueryResult, QueryTimeout, UnsafeSQLError, run_query
+from .warehouse import (
+    DEFAULT_TIMEOUT_SECONDS,
+    QueryResult,
+    QueryTimeout,
+    UnsafeSQLError,
+    run_query,
+)
 
 MAX_RETRIES = 1
 
@@ -81,10 +87,11 @@ def run_question(
     schema_text: str,
     reference: QueryResult,
     ordered: bool,
-    timeout: float = 15.0,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
     max_retries: int = MAX_RETRIES,
 ) -> Attempt:
-    prompt = build_prompt(question.question, schema_text)
+    system = build_system(schema_text)
+    prompt = build_prompt(question.question)
     usage_total = Usage()
     latency_total = 0.0
     tries = 0
@@ -95,7 +102,7 @@ def run_question(
 
     while tries <= max_retries:
         tries += 1
-        completion = provider.complete(SYSTEM_PROMPT, prompt)
+        completion = provider.complete(system, prompt)
         usage_total = Usage(
             usage_total.input_tokens + completion.usage.input_tokens,
             usage_total.output_tokens + completion.usage.output_tokens,
@@ -127,7 +134,7 @@ def run_question(
         if not is_retryable(failure) or tries > max_retries:
             break
         prompt = (
-            f"{build_prompt(question.question, schema_text)}\n\n"
+            f"{build_prompt(question.question)}\n\n"
             f"A previous attempt failed with this database error:\n{detail}\n\n"
             "Write the query again, corrected."
         )
@@ -158,7 +165,7 @@ def run_sweep(
     questions: list[Question],
     provider: Provider,
     variants: list[PromptVariant],
-    timeout: float = 15.0,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
     max_retries: int = MAX_RETRIES,
     progress: bool = True,
 ) -> RunResult:
