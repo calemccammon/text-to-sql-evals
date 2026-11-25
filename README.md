@@ -1,12 +1,12 @@
 # Text-to-SQL Evals
 
-A benchmark that measures whether a language model can turn a question into working SQL. It runs the generated query against a frozen DuckDB warehouse and compares the result set with the result of a reference query. SQL text is never compared.
+A benchmark that measures whether a language model can turn a question into working SQL. It runs each generated query against a fixed DuckDB warehouse and compares the rows it returns with the reference query's rows; the SQL text itself is never compared. Generated SQL is treated as untrusted and runs in an in-memory DuckDB with external access disabled and a 15-second timeout, and every wrong answer is sorted into a failure class such as unknown column, wrong shape or wrong order.
 
 ```
 question + schema -> model -> SQL -> guarded execution -> result-set comparison -> failure class -> report
 ```
 
-Three providers sit behind one interface: Claude through the Anthropic SDK, a local model served by Ollama, and a deterministic stub that needs no network. The committed results come from a local `llama3.2` run. No hosted sweep has been committed.
+Three providers sit behind one interface: Claude through the Anthropic SDK, a local model served by Ollama, and a deterministic stub that needs no network. The committed results come from a local `llama3.2` run, which answered 22 of 72 correctly ([Results](#results)). No hosted sweep has been committed.
 
 ## Running it
 
@@ -88,7 +88,7 @@ questions/questions.yaml          fixture/*.parquet
 | `evals/runner.py` | The sweep: generate, execute, compare, score, retry |
 | `evals/report.py` | Run JSON to `REPORT.md` |
 | `questions/questions.yaml` | 24 questions with reference SQL, a difficulty and feature tags |
-| `fixture/*.parquet` | The frozen warehouse (508 KB) |
+| `fixture/*.parquet` | The fixed warehouse |
 | `results/latest-run.json` | The committed run |
 | `main.py` | CLI |
 
@@ -102,11 +102,11 @@ The warehouse is a committed snapshot of the marts layer of [`data-engineer-fina
 | `dim_company` | 10 | 12 |
 | `dim_date` | 2,922 | 20 |
 
-The fact table covers 2024-06-20 to 2026-06-18. An eval run against data that changes cannot distinguish a model regression from a data change, so the fixture is pinned as Parquet and every run queries the same bytes. `tests/test_warehouse.py` asserts the date span and row count, so replacing the fixture fails CI.
+The fact table covers 2024-06-20 to 2026-06-18. If the data changed between runs, a drop in accuracy could be the model or the data, so the fixture is pinned as Parquet and every run queries the same bytes. `tests/test_warehouse.py` asserts the date span and row count, so replacing the fixture fails CI.
 
 ### Prompt variants
 
-How much schema to send is treated as a measured axis. Each question is asked once per variant.
+How much of the schema goes into the prompt is one of the things measured: each question is asked once per variant.
 
 | Variant | Schema text sent |
 |---|---|
@@ -189,7 +189,7 @@ These figures describe one small local model on 24 questions over one schema. Th
 
 ## Testing
 
-The suite has 107 test cases and needs no network, credential or database file. 28 of them cover `compare.py`, one or more per rule in the comparison policy. The rest cover the read-only guard and timeout, the fixture's row count and date span, error classification, SQL extraction, cost arithmetic, question validation, the Ollama provider through an injected transport, the retry path through a scripted provider, and stub sweeps through the runner and report.
+The tests need no network, credential or database file. Every rule in the comparison policy has at least one test in `tests/test_compare.py`. The rest cover the read-only guard and timeout, the fixture's row count and date span, error classification, SQL extraction, cost arithmetic, question validation, the Ollama provider through an injected transport, the retry path through a scripted provider, and stub sweeps through the runner and report.
 
 CI (`.github/workflows/ci.yml`) runs the tests, checks that `REPORT.md` matches the committed run, and runs a stub sweep with `--dry-run`.
 
@@ -207,4 +207,4 @@ The Anthropic provider has no tests.
 
 ## Data
 
-The fixture data originates from Yahoo Finance (via `yfinance`) and FRED, by way of the `data-engineer-finance-analytics` warehouse. It is a small historical slice included as a test fixture.
+The fixture data comes from Yahoo Finance (via `yfinance`) and FRED, by way of the `data-engineer-finance-analytics` warehouse. It is a small historical slice included as a test fixture.
